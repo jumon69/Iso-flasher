@@ -22,16 +22,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -40,7 +36,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -49,7 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.lifecycleScope
+import androidx.compose.ui.platform.testTag
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -115,7 +111,6 @@ class MainActivity : ComponentActivity() {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
-        // Register receiver utilizing export flag for compatibility
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -123,7 +118,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MyApplicationTheme(darkTheme = true) { // Force clean Premium Obsidian dark theme
+            MyApplicationTheme(darkTheme = true) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -176,12 +171,10 @@ fun FlasherScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // SAF File Picker implementation
     var isoUri by remember { mutableStateOf<Uri?>(null) }
     var isoName by remember { mutableStateOf<String?>(null) }
     var isoSizeFormatted by remember { mutableStateOf<String?>(null) }
 
-    // SAF Target USB Directory selection states
     var usbTreeUri by remember { mutableStateOf<Uri?>(null) }
     var usbTreeName by remember { mutableStateOf<String?>(null) }
 
@@ -207,40 +200,36 @@ fun FlasherScreen(
     ) { uri: Uri? ->
         uri?.let {
             isoUri = it
-            // Attempt to resolve display name and size from SAF
             val (name, size) = resolveUriDetails(context, it)
             isoName = name
             isoSizeFormatted = size
         }
     }
 
-    // Advanced Formatting Options States
     var selectedPartitionScheme by remember { mutableStateOf(UsbFlasherEngine.PartitionScheme.GPT) }
     var selectedTargetSystem by remember { mutableStateOf(UsbFlasherEngine.TargetSystem.UEFI_NON_CSM) }
     var selectedFileSystem by remember { mutableStateOf(UsbFlasherEngine.FileSystemType.FAT32) }
 
-    // USB device discovery state
     val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     var discoveredDevices by remember { mutableStateOf<List<UsbDevice>>(emptyList()) }
     var selectProtocolMode by remember { mutableStateOf(UsbFlasherEngine.ProtocolMode.SCSI_BOT) }
 
-    // Read flasher state flows
-    val flashStatus by flasher.status.collectAsState()
-    val consoleLogs by flasher.logs.collectAsState()
+    val flashStatus by flasher.status.collectAsStateWithLifecycle()
+    val consoleLogs by flasher.logs.collectAsStateWithLifecycle()
 
     val isFlashing = flashStatus is UsbFlasherEngine.FlashStatus.Progress ||
             flashStatus is UsbFlasherEngine.FlashStatus.Preparing ||
             flashStatus is UsbFlasherEngine.FlashStatus.Formatting
 
-    // Wake Lock Integration
     val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
     val wakeLock = remember {
         powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FlashEngine::WakeLock")
     }
+
     DisposableEffect(isFlashing) {
         if (isFlashing) {
             try {
-                wakeLock.acquire(30 * 60 * 1000L /* 30 minutes max */)
+                wakeLock.acquire(30 * 60 * 1000L)
                 Log.i("MainActivity", "WakeLock acquired for flashing process")
             } catch (e: Exception) {
                 Log.e("MainActivity", "Failed to acquire wake lock", e)
@@ -266,13 +255,11 @@ fun FlasherScreen(
         }
     }
 
-    // Helper to refresh connected list
     fun refreshUsbDevices() {
         val list = usbManager.deviceList.values.toList()
         discoveredDevices = list
     }
 
-    // Refresh initially and observe dynamic state changes
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -297,35 +284,6 @@ fun FlasherScreen(
 
         onDispose {
             context.unregisterReceiver(receiver)
-        }
-    }
-
-    var usbCapacityBytes by remember(selectedUsbDevice) { mutableStateOf<Long?>(null) }
-    var isCheckingCapacity by remember(selectedUsbDevice) { mutableStateOf(false) }
-
-    LaunchedEffect(selectedUsbDevice) {
-        if (selectedUsbDevice != null) {
-            isCheckingCapacity = true
-            usbCapacityBytes = withContext(Dispatchers.IO) {
-                flasher.queryDeviceCapacity(context, selectedUsbDevice)
-            }
-            isCheckingCapacity = false
-        } else {
-            usbCapacityBytes = null
-        }
-    }
-
-    fun formatCapacity(bytes: Long): String {
-        if (bytes <= 0) return "Unknown"
-        val kb = bytes / 1024.0
-        val mb = kb / 1024.0
-        val gb = mb / 1024.0
-        return if (gb >= 1.0) {
-            String.format("%.2f GB", gb)
-        } else if (mb >= 1.0) {
-            String.format("%.2f MB", mb)
-        } else {
-            String.format("%.2f KB", kb)
         }
     }
 
@@ -364,7 +322,7 @@ fun FlasherScreen(
                     containerColor = Color(0xFF1C1B1F)
                 ),
                 actions = {
-                    IconButton(onClick = { /* Settings context */ }) {
+                    IconButton(onClick = {}) {
                         Icon(
                             imageVector = Icons.Filled.Settings,
                             contentDescription = "Settings",
@@ -375,7 +333,6 @@ fun FlasherScreen(
             )
         },
         bottomBar = {
-            // Elegant navigation matching HTML layout
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -391,10 +348,9 @@ fun FlasherScreen(
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // TAB 1: FLASH (Active)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.clickable { /* Active context */ }
+                        modifier = Modifier.clickable { }
                     ) {
                         Box(
                             modifier = Modifier
@@ -419,7 +375,6 @@ fun FlasherScreen(
                         )
                     }
 
-                    // TAB 2: STATS
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable {
@@ -441,7 +396,6 @@ fun FlasherScreen(
                         )
                     }
 
-                    // TAB 3: HISTORY
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable {
@@ -465,7 +419,7 @@ fun FlasherScreen(
                 }
             }
         },
-        containerColor = Color(0xFF1C1B1F) // Theme dark background
+        containerColor = Color(0xFF1C1B1F)
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -475,7 +429,6 @@ fun FlasherScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // CARD 1: SOURCE ISO SELECTION
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
                     containerColor = Color(0xFF2B2930)
@@ -493,7 +446,7 @@ fun FlasherScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "SOURCE IMAGE",
                                 style = MaterialTheme.typography.labelMedium,
@@ -530,6 +483,7 @@ fun FlasherScreen(
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(16.dp))
                                 .background(Color(0xFF381E72))
+                                .testTag("select_iso_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.Search,
@@ -541,7 +495,6 @@ fun FlasherScreen(
                 }
             }
 
-            // CARD 2: USB DESTINATION DRIVE (SAF)
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
                     containerColor = Color(0xFF2B2930)
@@ -583,13 +536,6 @@ fun FlasherScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF938F99)
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Standard partition type automatically resolved safely",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFD0BCFF),
-                                fontWeight = FontWeight.Normal
-                            )
                         }
 
                         Row(
@@ -616,6 +562,7 @@ fun FlasherScreen(
                                     .size(48.dp)
                                     .clip(RoundedCornerShape(16.dp))
                                     .background(Color(0xFF381E72))
+                                    .testTag("select_usb_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.Search,
@@ -628,7 +575,6 @@ fun FlasherScreen(
                 }
             }
 
-            // CARD 3: ADVANCED FORMATTING OPTIONS
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
                     containerColor = Color(0xFF2B2930)
@@ -653,7 +599,6 @@ fun FlasherScreen(
                     var systemExpanded by remember { mutableStateOf(false) }
                     var fsExpanded by remember { mutableStateOf(false) }
 
-                    // Partition Scheme Selection
                     Column {
                         Text(
                             "Partition Scheme",
@@ -704,7 +649,6 @@ fun FlasherScreen(
                         }
                     }
 
-                    // Target System Selection
                     Column {
                         Text(
                             "Target System",
@@ -763,7 +707,6 @@ fun FlasherScreen(
                         }
                     }
 
-                    // File System Selection
                     Column {
                         Text(
                             "File System",
@@ -816,7 +759,6 @@ fun FlasherScreen(
                 }
             }
 
-            // SELECTION CARD 3: PROTOCOL SETTING MODE (Compact style matching theme)
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
                     containerColor = Color(0xFF2B2930)
@@ -875,8 +817,7 @@ fun FlasherScreen(
                 }
             }
 
-            // SAFETY ERASE DESTRUCTIVE WARNING PANEL
-            if (selectedUsbDevice != null) {
+            if (isoUri != null || usbTreeUri != null) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -903,7 +844,6 @@ fun FlasherScreen(
                 }
             }
 
-            // PROGRESS CARD OR SUCCESS STATUS SPANS
             AnimatedVisibility(
                 visible = isFlashing || flashStatus is UsbFlasherEngine.FlashStatus.Success || flashStatus is UsbFlasherEngine.FlashStatus.Error
             ) {
@@ -1025,15 +965,15 @@ fun FlasherScreen(
                                 )
                             }
                         }
-                        else -> {}
+
+                        is UsbFlasherEngine.FlashStatus.Idle -> {}
                     }
                 }
             }
 
-            // CONSOLE LOG COMPARTMENT
             Box(
                 modifier = Modifier
-                    .height(240.dp)
+                    .height(200.dp)
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF151518))
@@ -1076,7 +1016,6 @@ fun FlasherScreen(
                 }
             }
 
-            // PRIMARY BIG TRIGGER BUTTON
             if (isFlashing) {
                 Button(
                     onClick = { flasher.cancelFlashing() },
@@ -1086,7 +1025,8 @@ fun FlasherScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(56.dp)
+                        .testTag("abort_button"),
                     shape = androidx.compose.foundation.shape.CircleShape
                 ) {
                     Icon(imageVector = Icons.Filled.Clear, contentDescription = "Abort")
@@ -1118,7 +1058,8 @@ fun FlasherScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(56.dp)
+                        .testTag("flash_button"),
                     shape = androidx.compose.foundation.shape.CircleShape
                 ) {
                     Row(
@@ -1162,9 +1103,6 @@ fun SectionHeader(
     }
 }
 
-/**
- * Extracts human-readable filename and size formatting from a SAF Uri.
- */
 private fun resolveUriDetails(context: Context, uri: Uri): Pair<String, String> {
     var fileName = "Selected File"
     var sizeLabel = "Unknown Size"

@@ -3,7 +3,6 @@ package com.example
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
@@ -12,10 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.InputStream
-import java.io.OutputStream
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.charset.Charset
 
 class UsbFlasherEngine {
 
@@ -94,19 +90,27 @@ class UsbFlasherEngine {
     )
 
     class SeekableIsoReader(private val inputStream: InputStream) {
-        private val channel: java.nio.channels.FileChannel? = (inputStream as? java.io.FileInputStream)?.channel
+        private val channel: java.nio.channels.FileChannel? = try {
+            (inputStream as? java.io.FileInputStream)?.channel
+        } catch (e: Exception) {
+            null
+        }
 
         fun read(position: Long, dest: ByteArray, offset: Int, length: Int): Int {
-            val ch = channel ?: throw Exception("Underlying system stream does not support random seek operations. Please select a local file source.")
-            ch.position(position)
-            var totalRead = 0
-            while (totalRead < length) {
-                val byteBuffer = ByteBuffer.wrap(dest, offset + totalRead, length - totalRead)
-                val read = ch.read(byteBuffer)
-                if (read == -1) break
-                totalRead += read
+            val ch = channel ?: throw Exception(
+                "System InputStream of type '${inputStream.javaClass.name}' does not support direct binary random access (FileChannel is null). Please ensure the ISO file is stored on local storage."
+            )
+            synchronized(ch) {
+                ch.position(position)
+                var totalRead = 0
+                while (totalRead < length) {
+                    val byteBuffer = ByteBuffer.wrap(dest, offset + totalRead, length - totalRead)
+                    val read = ch.read(byteBuffer)
+                    if (read == -1) break
+                    totalRead += read
+                }
+                return totalRead
             }
-            return totalRead
         }
 
         fun close() {
@@ -165,7 +169,7 @@ class UsbFlasherEngine {
             }
 
             // 2. Open ISO using openInputStream for a seekable stream
-            addLog("[INFO] Opening source ISO details...")
+            addLog("[INFO] Opening source ISO via ContentResolver.openInputStream...")
             val inputStream = context.contentResolver.openInputStream(isoUri)
                 ?: throw Exception("Could not open read stream for selected ISO file.")
             reader = SeekableIsoReader(inputStream)
@@ -212,13 +216,13 @@ class UsbFlasherEngine {
             }
 
             // 4. Record recursive filesystem log lists
-            addLog("[INFO] Root Directory LBA=$rootLba Size=$rootSize. Crawling directory file nodes tree (Joliet=$isJoliet)...")
+            addLog("[INFO] Root Directory LBA=$rootLba Size=$rootSize. Crawling directory tree...")
             val isoEntries = mutableListOf<IsoFileEntry>()
             scanIsoEntries(reader, rootLba, rootSize, "", isJoliet, isoEntries)
 
             val totalFilesCount = isoEntries.count { !it.isDirectory }
             val totalBytes = isoEntries.filter { !it.isDirectory }.sumOf { it.size }
-            addLog("[INFO] Crawled directory structure. Found ${isoEntries.size} entries total ($totalFilesCount files representing ${String.format("%.2f", totalBytes / (1024.0 * 1024.0))} MB).")
+            addLog("[INFO] Crawled structure. Found ${isoEntries.size} entries total ($totalFilesCount files, ${String.format("%.2f", totalBytes / (1024.0 * 1024.0))} MB).")
 
             // 4b. Pre-flight boot structure validation check
             addLog("[PRE-FLIGHT] Verifying bootable signatures in ISO structure...")
@@ -254,7 +258,7 @@ class UsbFlasherEngine {
                 try {
                     element.delete()
                 } catch (e: Exception) {
-                    addLog("[WIPE-WARN] Fails to completely delete $name: ${e.message}")
+                    addLog("[WIPE-WARN] Failed to completely delete $name: ${e.message}")
                 }
             }
             addLog("[WIPE] Done wiping file nodes. Active folder is ready.")
@@ -292,7 +296,7 @@ class UsbFlasherEngine {
                     if (fileSystemType == FileSystemType.FAT32 && entry.size > 4294967295L) {
                         addLog("[WARNING] FAT32 4GB limit exceeded for '$relativePath' (${String.format("%.2f", entry.size / (1024.0*1024.0*1024.0))} GB). Initiating auto-split...")
                         
-                        val maxChunkSize = 3500000000L // 3.5 GB (safe below FAT32 limit)
+                        val maxChunkSize = 3500000000L // 3.5 GB
                         val totalParts = ((entry.size + maxChunkSize - 1) / maxChunkSize).toInt()
                         
                         for (partIndex in 0 until totalParts) {
@@ -359,20 +363,19 @@ class UsbFlasherEngine {
                             }
                         }
                     } else {
-                        // Existing block override resilience
+                        // Regular sector-by-sector copy
                         val existingFile = parentDir.findFile(fileName)
                         existingFile?.delete()
 
                         val targetFile = parentDir.createFile("application/octet-stream", fileName)
                             ?: throw Exception("Failed to create file container in target USB drive: $relativePath")
 
-                        // Stream payload
                         val outputStream = context.contentResolver.openOutputStream(targetFile.uri)
                             ?: throw Exception("Failed to open file output stream writing stream channel: $relativePath")
 
                         outputStream.use { out ->
                             var fileBytesWritten = 0L
-                            val copyBuffer = ByteArray(65536) // Robust efficiency 64KB block buffers
+                            val copyBuffer = ByteArray(65536) // 64KB block buffer
 
                             while (fileBytesWritten < entry.size && !isCancelled) {
                                 val remaining = entry.size - fileBytesWritten
@@ -384,7 +387,7 @@ class UsbFlasherEngine {
                                 fileBytesWritten += read
                                 totalBytesWrittenAccumulator += read
 
-                                // Throttled notification logs
+                                // Progress throttling updates
                                 val elapsedNow = System.currentTimeMillis() - startTime
                                 val speed = if (elapsedNow > 0) {
                                     (totalBytesWrittenAccumulator / (1024.0 * 1024.0)) / (elapsedNow / 1000.0)
@@ -409,7 +412,7 @@ class UsbFlasherEngine {
                     }
                     
                     val fileMb = String.format("%.2f MB", entry.size / (1024.0 * 1024.0))
-                    addLog("[COPY] Extracted successfully: /$relativePath ($fileMb)")
+                    addLog("[COPY] Extracted successfully: /$relativePath ($fileMb) [LBA: ${entry.lba}, Size: ${entry.size} bytes]")
                 }
             }
 
@@ -420,7 +423,6 @@ class UsbFlasherEngine {
                 val totalDuration = System.currentTimeMillis() - startTime
                 addLog("[SUCCESS] All files copied and boot sector maps verified successfully!")
                 addLog("[SUCCESS] Total written files size: ${totalBytesWrittenAccumulator} bytes in ${String.format("%.1f", totalDuration / 1000.0)} seconds.")
-                addLog("[INFO] Specific boot loaders (bootmgr, EFI/ folders) mapped correctly to target sectors.")
                 _status.value = FlashStatus.Success(totalBytesWrittenAccumulator, totalDuration)
             }
 
