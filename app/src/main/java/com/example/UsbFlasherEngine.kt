@@ -219,6 +219,22 @@ class UsbFlasherEngine {
             val totalBytes = isoEntries.filter { !it.isDirectory }.sumOf { it.size }
             addLog("[INFO] Crawled directory structure. Found ${isoEntries.size} entries total ($totalFilesCount files representing ${String.format("%.2f", totalBytes / (1024.0 * 1024.0))} MB).")
 
+            // 4b. Pre-flight boot structure validation check
+            addLog("[PRE-FLIGHT] Verifying bootable signatures in ISO structure...")
+            val containsEfi = isoEntries.any { it.path.startsWith("efi/", ignoreCase = true) || it.path.startsWith("EFI/", ignoreCase = true) }
+            val containsBootmgr = isoEntries.any { it.path.equals("bootmgr", ignoreCase = true) || it.path.equals("bootmgr.efi", ignoreCase = true) }
+            val containsIsolinux = isoEntries.any { it.path.contains("isolinux", ignoreCase = true) || it.path.contains("syslinux", ignoreCase = true) }
+
+            if (containsEfi || containsBootmgr || containsIsolinux) {
+                val detectMethods = mutableListOf<String>()
+                if (containsEfi) detectMethods.add("UEFI (EFI/)")
+                if (containsBootmgr) detectMethods.add("Windows Boot Manager (bootmgr)")
+                if (containsIsolinux) detectMethods.add("Linux Bootloader (isolinux/syslinux)")
+                addLog("[PRE-FLIGHT] Bootable indicators detected: ${detectMethods.joinToString(", ")}. Pre-flight validation passed.")
+            } else {
+                addLog("[PRE-FLIGHT] [WARNING] No standard UEFI (EFI/) or legacy boot (bootmgr/isolinux) paths were detected. ISO image may not boot if flashed to USB drives.")
+            }
+
             if (isCancelled) {
                 _status.value = FlashStatus.Error("Cancelled by user.")
                 return@withContext

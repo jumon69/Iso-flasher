@@ -12,6 +12,7 @@ import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
 import android.widget.Toast
@@ -227,6 +228,44 @@ fun FlasherScreen(
     val flashStatus by flasher.status.collectAsState()
     val consoleLogs by flasher.logs.collectAsState()
 
+    val isFlashing = flashStatus is UsbFlasherEngine.FlashStatus.Progress ||
+            flashStatus is UsbFlasherEngine.FlashStatus.Preparing ||
+            flashStatus is UsbFlasherEngine.FlashStatus.Formatting
+
+    // Wake Lock Integration
+    val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
+    val wakeLock = remember {
+        powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FlashEngine::WakeLock")
+    }
+    DisposableEffect(isFlashing) {
+        if (isFlashing) {
+            try {
+                wakeLock.acquire(30 * 60 * 1000L /* 30 minutes max */)
+                Log.i("MainActivity", "WakeLock acquired for flashing process")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to acquire wake lock", e)
+            }
+        } else {
+            if (wakeLock.isHeld) {
+                try {
+                    wakeLock.release()
+                    Log.i("MainActivity", "WakeLock released")
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Failed to release wake lock", e)
+                }
+            }
+        }
+        onDispose {
+            if (wakeLock.isHeld) {
+                try {
+                    wakeLock.release()
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Cleanup wake lock failed", e)
+                }
+            }
+        }
+    }
+
     // Helper to refresh connected list
     fun refreshUsbDevices() {
         val list = usbManager.deviceList.values.toList()
@@ -436,11 +475,6 @@ fun FlasherScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Is Flashing Guard State
-            val isFlashing = flashStatus is UsbFlasherEngine.FlashStatus.Progress ||
-                    flashStatus is UsbFlasherEngine.FlashStatus.Preparing ||
-                    flashStatus is UsbFlasherEngine.FlashStatus.Formatting
-
             // CARD 1: SOURCE ISO SELECTION
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
@@ -999,7 +1033,7 @@ fun FlasherScreen(
             // CONSOLE LOG COMPARTMENT
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .height(240.dp)
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF151518))
