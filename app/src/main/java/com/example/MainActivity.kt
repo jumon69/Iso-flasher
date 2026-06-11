@@ -1040,13 +1040,6 @@ fun FlasherScreen(
                     .border(1.dp, Color(0xFF2B2930), RoundedCornerShape(12.dp))
                     .padding(8.dp)
             ) {
-                val logListState = rememberLazyListState()
-                LaunchedEffect(consoleLogs.size) {
-                    if (consoleLogs.isNotEmpty()) {
-                        logListState.animateScrollToItem(consoleLogs.size - 1)
-                    }
-                }
-
                 if (consoleLogs.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
@@ -1060,12 +1053,12 @@ fun FlasherScreen(
                         )
                     }
                 } else {
-                    LazyColumn(
-                        state = logListState,
+                    val displayedLogs = consoleLogs.takeLast(25)
+                    Column(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        items(consoleLogs) { logLine ->
+                        displayedLogs.forEach { logLine ->
                             Text(
                                 text = logLine,
                                 color = when {

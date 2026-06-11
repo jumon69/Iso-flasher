@@ -93,13 +93,16 @@ class UsbFlasherEngine {
         val isDirectory: Boolean
     )
 
-    class SeekableIsoReader(private val pfd: ParcelFileDescriptor, private val channel: java.nio.channels.FileChannel) {
+    class SeekableIsoReader(private val inputStream: InputStream) {
+        private val channel: java.nio.channels.FileChannel? = (inputStream as? java.io.FileInputStream)?.channel
+
         fun read(position: Long, dest: ByteArray, offset: Int, length: Int): Int {
-            channel.position(position)
+            val ch = channel ?: throw Exception("Underlying system stream does not support random seek operations. Please select a local file source.")
+            ch.position(position)
             var totalRead = 0
             while (totalRead < length) {
                 val byteBuffer = ByteBuffer.wrap(dest, offset + totalRead, length - totalRead)
-                val read = channel.read(byteBuffer)
+                val read = ch.read(byteBuffer)
                 if (read == -1) break
                 totalRead += read
             }
@@ -108,8 +111,7 @@ class UsbFlasherEngine {
 
         fun close() {
             try {
-                channel.close()
-                pfd.close()
+                inputStream.close()
             } catch (e: Exception) {
                 // Ignore
             }
@@ -162,12 +164,11 @@ class UsbFlasherEngine {
                 throw Exception("Unable to write to the selected target directory. Please ensure read/write permissions are granted in the picker.")
             }
 
-            // 2. Open ISO and setup PFD FileChannel for seekable random reads
+            // 2. Open ISO using openInputStream for a seekable stream
             addLog("[INFO] Opening source ISO details...")
-            val pfd = context.contentResolver.openFileDescriptor(isoUri, "r")
-                ?: throw Exception("Could not open read descriptor for selected ISO file.")
-            val fis = java.io.FileInputStream(pfd.fileDescriptor)
-            reader = SeekableIsoReader(pfd, fis.channel)
+            val inputStream = context.contentResolver.openInputStream(isoUri)
+                ?: throw Exception("Could not open read stream for selected ISO file.")
+            reader = SeekableIsoReader(inputStream)
 
             // 3. Parse ISO structure
             addLog("[INFO] Detecting ISO9660 Volume Descriptors...")
