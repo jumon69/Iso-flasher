@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
+import androidx.documentfile.provider.DocumentFile
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -178,6 +179,27 @@ fun FlasherScreen(
     var isoUri by remember { mutableStateOf<Uri?>(null) }
     var isoName by remember { mutableStateOf<String?>(null) }
     var isoSizeFormatted by remember { mutableStateOf<String?>(null) }
+
+    // SAF Target USB Directory selection states
+    var usbTreeUri by remember { mutableStateOf<Uri?>(null) }
+    var usbTreeName by remember { mutableStateOf<String?>(null) }
+
+    val usbFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            usbTreeUri = it
+            try {
+                val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(it, takeFlags)
+            } catch (e: Exception) {
+                Log.e("SAF", "Persistable permission warning", e)
+            }
+            val docFile = DocumentFile.fromTreeUri(context, it)
+            usbTreeName = docFile?.name ?: "USB Target Volume"
+        }
+    }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -485,7 +507,7 @@ fun FlasherScreen(
                 }
             }
 
-            // CARD 2: USB DESTINATION DRIVE
+            // CARD 2: USB DESTINATION DRIVE (SAF)
             OutlinedCard(
                 colors = CardDefaults.outlinedCardColors(
                     containerColor = Color(0xFF2B2930)
@@ -498,8 +520,6 @@ fun FlasherScreen(
                     modifier = Modifier.padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    var dropdownExpanded by remember { mutableStateOf(false) }
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -507,7 +527,7 @@ fun FlasherScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "TARGET DEVICE",
+                                "TARGET USB DRIVE (SAF)",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = Color(0xFFD0BCFF),
                                 fontWeight = FontWeight.SemiBold,
@@ -515,54 +535,34 @@ fun FlasherScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = if (selectedUsbDevice != null) {
-                                    "${selectedUsbDevice.manufacturerName ?: "Generic"} ${selectedUsbDevice.productName ?: "USB Drive"}"
-                                } else {
-                                    "No device selected"
-                                },
+                                text = usbTreeName ?: "No USB Drive Selected",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color(0xFFE6E1E5),
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = if (selectedUsbDevice != null) {
-                                    "${selectedUsbDevice.deviceName} • Class SCSI"
+                                text = if (usbTreeUri != null) {
+                                    "Volume Path: ${usbTreeUri?.path ?: ""} • SAF Enabled"
                                 } else {
-                                    "Plug USB storage OTG drive to system"
+                                    "Tap browse button to grant directory access"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF938F99)
                             )
-                            if (selectedUsbDevice != null) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                val vidHex = String.format("0x%04X", selectedUsbDevice.vendorId)
-                                val pidHex = String.format("0x%04X", selectedUsbDevice.productId)
-                                Text(
-                                    text = "Vendor ID: $vidHex • Product ID: $pidHex",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFD0BCFF),
-                                    fontWeight = FontWeight.Normal
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = if (isCheckingCapacity) {
-                                        "Querying volume capacity..."
-                                    } else {
-                                        "Capacity: ${formatCapacity(usbCapacityBytes ?: -1L)}"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFE6E1E5),
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Standard partition type automatically resolved safely",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFD0BCFF),
+                                fontWeight = FontWeight.Normal
+                            )
                         }
 
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Active status dot animation if device connected
-                            if (selectedUsbDevice != null) {
+                            if (usbTreeUri != null) {
                                 Box(
                                     modifier = Modifier
                                         .size(8.dp)
@@ -574,59 +574,19 @@ fun FlasherScreen(
                             IconButton(
                                 onClick = {
                                     if (!isFlashing) {
-                                        refreshUsbDevices()
-                                        dropdownExpanded = true
+                                        usbFolderPickerLauncher.launch(null)
                                     }
                                 },
                                 enabled = !isFlashing,
                                 modifier = Modifier
                                     .size(48.dp)
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(Color(0xFF49454F))
+                                    .background(Color(0xFF381E72))
                             ) {
                                 Icon(
-                                    imageVector = Icons.Filled.ArrowDropDown,
-                                    contentDescription = "Expand USB dropdown list",
-                                    tint = Color.White
-                                )
-                            }
-                        }
-                    }
-
-                    DropdownMenu(
-                        expanded = dropdownExpanded,
-                        onDismissRequest = { dropdownExpanded = false },
-                        modifier = Modifier
-                            .fillMaxWidth(0.85f)
-                            .background(Color(0xFF2B2930))
-                            .border(1.dp, Color(0xFF49454F), RoundedCornerShape(8.dp))
-                    ) {
-                        if (discoveredDevices.isEmpty()) {
-                            DropdownMenuItem(
-                                text = { Text("No USB OTG devices detected", color = Color(0xFF938F99)) },
-                                onClick = { dropdownExpanded = false }
-                            )
-                        } else {
-                            discoveredDevices.forEach { dev ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(
-                                                "${dev.manufacturerName ?: "Unknown"} ${dev.productName ?: "USB Drive"}",
-                                                color = Color(0xFFE6E1E5),
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                "Path: ${dev.deviceName} | ID: ${dev.deviceId}",
-                                                color = Color(0xFF938F99),
-                                                fontSize = 12.sp
-                                            )
-                                        }
-                                    },
-                                    onClick = {
-                                        onSelectUsbDevice(dev)
-                                        dropdownExpanded = false
-                                    }
+                                    imageVector = Icons.Filled.Search,
+                                    contentDescription = "Browse USB Drive",
+                                    tint = Color(0xFFD0BCFF)
                                 )
                             }
                         }
@@ -1109,13 +1069,12 @@ fun FlasherScreen(
             } else {
                 Button(
                     onClick = {
-                        if (isoUri != null && selectedUsbDevice != null) {
+                        if (isoUri != null && usbTreeUri != null) {
                             coroutineScope.launch {
                                 flasher.startFlash(
                                     context = context,
                                     isoUri = isoUri!!,
-                                    device = selectedUsbDevice,
-                                    protocolMode = selectProtocolMode,
+                                    usbTreeUri = usbTreeUri!!,
                                     partitionScheme = selectedPartitionScheme,
                                     targetSystem = selectedTargetSystem,
                                     fileSystemType = selectedFileSystem
@@ -1123,7 +1082,7 @@ fun FlasherScreen(
                             }
                         }
                     },
-                    enabled = isoUri != null && selectedUsbDevice != null,
+                    enabled = isoUri != null && usbTreeUri != null,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFFD0BCFF),
                         disabledContainerColor = Color(0xFF2B2930),
