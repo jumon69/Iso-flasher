@@ -21,7 +21,7 @@ class GreetingScreenshotTest {
 
   @Test
   fun greeting_screenshot() {
-    val flasher = FlashEngine()
+    val flasher = UsbFlasherEngine()
     composeTestRule.setContent {
       MyApplicationTheme(darkTheme = true) {
         FlasherScreen(
