@@ -271,58 +271,123 @@ class UsbFlasherEngine {
                     val parentDir = getOrCreateDirectory(usbRootDir, parentPath, dirCache)
                         ?: throw Exception("Failed to map target directory path: $parentPath")
 
-                    // Resilience checks for FAT32 files > 4GB
+                    // Split files > 4GB on FAT32 filesystem
                     if (fileSystemType == FileSystemType.FAT32 && entry.size > 4294967295L) {
-                        addLog("[CRITICAL] FAT32 Limitation Violation: File '$relativePath' is greater than 4GB (~${String.format("%.2f", entry.size / (1024.0*1024.0*1024.0))} GB)!")
-                        addLog("[CRITICAL] Android FAT32 driver does not allow writing files larger than 4GB. Please format the USB drive to NTFS/exFAT.")
-                        throw Exception("File '$fileName' exceeds 4GB on FAT32 format limits. Please select NTFS/exFAT.")
-                    }
+                        addLog("[WARNING] FAT32 4GB limit exceeded for '$relativePath' (${String.format("%.2f", entry.size / (1024.0*1024.0*1024.0))} GB). Initiating auto-split...")
+                        
+                        val maxChunkSize = 3500000000L // 3.5 GB (safe below FAT32 limit)
+                        val totalParts = ((entry.size + maxChunkSize - 1) / maxChunkSize).toInt()
+                        
+                        for (partIndex in 0 until totalParts) {
+                            if (isCancelled) break
+                            
+                            val partName = if (fileName.equals("install.wim", ignoreCase = true)) {
+                                if (partIndex == 0) "install.swm" else "install${partIndex + 1}.swm"
+                            } else {
+                                "$fileName.part${partIndex + 1}"
+                            }
+                            
+                            val partSize = if (partIndex == totalParts - 1) {
+                                entry.size - (partIndex * maxChunkSize)
+                            } else {
+                                maxChunkSize
+                            }
+                            
+                            addLog("[SPLIT] Extracting '$fileName' part ${partIndex + 1}/$totalParts as '$partName' (${String.format("%.2f MB", partSize / (1024.0 * 1024.0))})")
+                            
+                            val existingFile = parentDir.findFile(partName)
+                            existingFile?.delete()
+                            
+                            val targetFile = parentDir.createFile("application/octet-stream", partName)
+                                ?: throw Exception("Failed to create file container in target USB drive: $relativePath ($partName)")
+                            
+                            val outputStream = context.contentResolver.openOutputStream(targetFile.uri)
+                                ?: throw Exception("Failed to open file output stream: $relativePath ($partName)")
+                            
+                            outputStream.use { out ->
+                                var fileBytesWritten = 0L
+                                val copyBuffer = ByteArray(65536) // 64KB block buffer
+                                val partStartOffsetInIso = partIndex * maxChunkSize
+                                
+                                while (fileBytesWritten < partSize && !isCancelled) {
+                                    val remaining = partSize - fileBytesWritten
+                                    val toRead = minOf(copyBuffer.size.toLong(), remaining).toInt()
+                                    val read = reader.read(entry.lba * 2048L + partStartOffsetInIso + fileBytesWritten, copyBuffer, 0, toRead)
+                                    if (read <= 0) break
+                                    
+                                    out.write(copyBuffer, 0, read)
+                                    fileBytesWritten += read
+                                    totalBytesWrittenAccumulator += read
+                                    
+                                    val elapsedNow = System.currentTimeMillis() - startTime
+                                    val speed = if (elapsedNow > 0) {
+                                        (totalBytesWrittenAccumulator / (1024.0 * 1024.0)) / (elapsedNow / 1000.0)
+                                    } else 0.0
+                                    
+                                    val eta = if (speed > 0) {
+                                        ((totalBytes - totalBytesWrittenAccumulator) / (speed * 1024.0 * 1024.0)).toLong()
+                                    } else 0L
+                                    
+                                    val percentage = (totalBytesWrittenAccumulator.toFloat() / totalBytes.toFloat()) * 100f
+                                    
+                                    _status.value = FlashStatus.Progress(
+                                        percentage = percentage,
+                                        bytesWritten = totalBytesWrittenAccumulator,
+                                        totalBytes = totalBytes,
+                                        speedMbPerSec = speed,
+                                        etaSeconds = eta,
+                                        currentFile = "$relativePath ($partName: ${partIndex + 1}/$totalParts)"
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // Existing block override resilience
+                        val existingFile = parentDir.findFile(fileName)
+                        existingFile?.delete()
 
-                    // Existing block override resilience
-                    val existingFile = parentDir.findFile(fileName)
-                    existingFile?.delete()
+                        val targetFile = parentDir.createFile("application/octet-stream", fileName)
+                            ?: throw Exception("Failed to create file container in target USB drive: $relativePath")
 
-                    val targetFile = parentDir.createFile("application/octet-stream", fileName)
-                        ?: throw Exception("Failed to create file container in target USB drive: $relativePath")
+                        // Stream payload
+                        val outputStream = context.contentResolver.openOutputStream(targetFile.uri)
+                            ?: throw Exception("Failed to open file output stream writing stream channel: $relativePath")
 
-                    // Stream payload
-                    val outputStream = context.contentResolver.openOutputStream(targetFile.uri)
-                        ?: throw Exception("Failed to open file output stream writing stream channel: $relativePath")
+                        outputStream.use { out ->
+                            var fileBytesWritten = 0L
+                            val copyBuffer = ByteArray(65536) // Robust efficiency 64KB block buffers
 
-                    outputStream.use { out ->
-                        var fileBytesWritten = 0L
-                        val copyBuffer = ByteArray(65536) // Robust efficiency 64KB block buffers
+                            while (fileBytesWritten < entry.size && !isCancelled) {
+                                val remaining = entry.size - fileBytesWritten
+                                val toRead = minOf(copyBuffer.size.toLong(), remaining).toInt()
+                                val read = reader.read(entry.lba * 2048L + fileBytesWritten, copyBuffer, 0, toRead)
+                                if (read <= 0) break
 
-                        while (fileBytesWritten < entry.size && !isCancelled) {
-                            val remaining = entry.size - fileBytesWritten
-                            val toRead = minOf(copyBuffer.size.toLong(), remaining).toInt()
-                            val read = reader.read(entry.lba * 2048L + fileBytesWritten, copyBuffer, 0, toRead)
-                            if (read <= 0) break
+                                out.write(copyBuffer, 0, read)
+                                fileBytesWritten += read
+                                totalBytesWrittenAccumulator += read
 
-                            out.write(copyBuffer, 0, read)
-                            fileBytesWritten += read
-                            totalBytesWrittenAccumulator += read
+                                // Throttled notification logs
+                                val elapsedNow = System.currentTimeMillis() - startTime
+                                val speed = if (elapsedNow > 0) {
+                                    (totalBytesWrittenAccumulator / (1024.0 * 1024.0)) / (elapsedNow / 1000.0)
+                                } else 0.0
 
-                            // Throttled notification logs
-                            val elapsedNow = System.currentTimeMillis() - startTime
-                            val speed = if (elapsedNow > 0) {
-                                (totalBytesWrittenAccumulator / (1024.0 * 1024.0)) / (elapsedNow / 1000.0)
-                            } else 0.0
+                                val eta = if (speed > 0) {
+                                    ((totalBytes - totalBytesWrittenAccumulator) / (speed * 1024.0 * 1024.0)).toLong()
+                                } else 0L
 
-                            val eta = if (speed > 0) {
-                                ((totalBytes - totalBytesWrittenAccumulator) / (speed * 1024.0 * 1024.0)).toLong()
-                            } else 0L
+                                val percentage = (totalBytesWrittenAccumulator.toFloat() / totalBytes.toFloat()) * 100f
 
-                            val percentage = (totalBytesWrittenAccumulator.toFloat() / totalBytes.toFloat()) * 100f
-
-                            _status.value = FlashStatus.Progress(
-                                percentage = percentage,
-                                bytesWritten = totalBytesWrittenAccumulator,
-                                totalBytes = totalBytes,
-                                speedMbPerSec = speed,
-                                etaSeconds = eta,
-                                currentFile = relativePath
-                            )
+                                _status.value = FlashStatus.Progress(
+                                    percentage = percentage,
+                                    bytesWritten = totalBytesWrittenAccumulator,
+                                    totalBytes = totalBytes,
+                                    speedMbPerSec = speed,
+                                    etaSeconds = eta,
+                                    currentFile = relativePath
+                                )
+                            }
                         }
                     }
                     
