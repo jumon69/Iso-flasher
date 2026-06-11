@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Mass Storage subclass SCSI (class=8, subclass=6) -->
+    <usb-device class="8" subclass="6" protocol="80" />
+    <usb-device class="8" subclass="6" protocol="0" />
+    <usb-device class="8" />
+</resources>

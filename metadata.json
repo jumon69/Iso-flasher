@@ -1,0 +1,6 @@
+{
+  "name": "ISO to USB Flasher",
+  "description": "A powerful utility to write/flash ISO images directly to USB storage devices using OTG.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

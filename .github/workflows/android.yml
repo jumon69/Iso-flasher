@@ -1,0 +1,44 @@
+name: Android CI/CD Build pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout codebase from Git
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # 2. Setup JDK 17 environment
+      - name: Setup Java Development Kit (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      # 3. Cache Gradle packages to accelerate build speed
+      - name: Setup Gradle Cache & Action Suite
+        uses: gradle/actions/setup-gradle@v3
+
+      # 4. Grant full execution permissions to the Gradle Wrapper script page
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      # 5. Build the Release APK (fallback signs using the local debug key automatically if release JKS is omitted)
+      - name: Build Unsigned/Signed Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      # 6. Locate and upload the APK as a secure workflow build artifact
+      - name: Upload Output APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-to-USB-Flasher-Release-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
